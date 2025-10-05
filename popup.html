@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+    <div id="loadingOverlay">
+        <div class="spinner"></div>
+        <p id="loadingMessage">Memverifikasi sesi...</p>
+    </div>
+
+    <div class="container" style="visibility: hidden;">
+        
+        <header class="app-header">
+            <div class="header-title">
+                <span class="header-icon">🔗</span>
+                SERP Link Copier
+            </div>
+            <div id="authContainer">
+                <div id="userInfo">
+                    <span id="userEmail"></span>
+                    <button id="logoutButton">Logout</button>
+                </div>
+                <div id="loginForm">
+                    <input type="email" id="emailInput" placeholder="Email">
+                    <input type="password" id="passwordInput" placeholder="Password">
+                    <button id="loginButton">Login</button>
+                </div>
+            </div>
+        </header>
+        
+        <div id="loginNotice" class="notice-board">
+            <p>Silakan login untuk menggunakan semua fitur.</p>
+        </div>
+
+        <div id="mainAppContainer">
+            <h4 id="searchQuery" class="hidden"></h4>
+            <div class="actions-container">
+                <button id="getLinksButton">Ambil Link</button>
+                <button id="viewWhitelistButton" class="view-whitelist">Lihat Whitelist</button>
+                <button id="resetButton" class="reset">Reset Hasil</button>
+            </div>
+            <div id="copyContainer" class="hidden">
+                <button id="copyReportButton" class="copy-button report">Copy untuk Laporan</button>
+                <button id="copyLinksButton" class="copy-button links">Copy Link Saja</button>
+            </div>
+            <div id="filterContainer" class="hidden">
+                <input type="text" id="filterInput" placeholder="Cari link di sini...">
+            </div>
+            <div id="results">
+                </div>
+        </div>
+    </div>
+
+    <script src="firebase/firebase-app-compat.js"></script>
+    <script src="firebase/firebase-auth-compat.js"></script>
+    <script src="firebase/firebase-firestore-compat.js"></script>
+    <script src="popup.js"></script>
+</body>
+</html>
