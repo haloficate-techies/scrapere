@@ -500,13 +500,57 @@ function filterResults() {
 filterInput.addEventListener('input', filterResults);
 
 function filterWhitelist(event) {
-    const searchTerm = event.target.value.toLowerCase();
+    const searchTerm = event.target.value.trim().toLowerCase();
     const allItems = document.querySelectorAll('.accordion-item');
+
     allItems.forEach(item => {
-        const headerText = item.querySelector('.accordion-header').textContent.toLowerCase();
-        const links = Array.from(item.querySelectorAll('.whitelist-item span')).map(span => span.textContent.toLowerCase());
-        const hasMatch = headerText.includes(searchTerm) || links.some(link => link.includes(searchTerm));
-        item.style.display = hasMatch ? '' : 'none';
+        const header = item.querySelector('.accordion-header');
+        const content = item.querySelector('.accordion-content');
+        const rows = Array.from(content.querySelectorAll('.whitelist-item'));
+
+        if (!searchTerm) {
+            item.style.display = '';
+            rows.forEach(row => { row.style.display = ''; });
+            if (header.dataset.searchToggled === 'true') {
+                header.classList.remove('active');
+                delete header.dataset.searchToggled;
+            }
+            if (header.classList.contains('active')) {
+                content.style.maxHeight = content.scrollHeight + 'px';
+            } else {
+                content.style.maxHeight = null;
+            }
+            return;
+        }
+
+        const categoryMatch = header.textContent.toLowerCase().includes(searchTerm);
+        let matchedLinks = 0;
+
+        rows.forEach(row => {
+            const linkText = row.querySelector('span').textContent.toLowerCase();
+            const isMatch = linkText.includes(searchTerm);
+            row.style.display = isMatch ? '' : 'none';
+            if (isMatch) { matchedLinks += 1; }
+        });
+
+        if (matchedLinks > 0) {
+            item.style.display = '';
+            if (!header.classList.contains('active')) {
+                header.classList.add('active');
+                header.dataset.searchToggled = 'true';
+            }
+            content.style.maxHeight = content.scrollHeight + 'px';
+        } else if (categoryMatch) {
+            item.style.display = '';
+            rows.forEach(row => { row.style.display = ''; });
+            if (!header.classList.contains('active')) {
+                header.classList.add('active');
+                header.dataset.searchToggled = 'true';
+            }
+            content.style.maxHeight = content.scrollHeight + 'px';
+        } else {
+            item.style.display = 'none';
+        }
     });
 }
 
