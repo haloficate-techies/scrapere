@@ -51,14 +51,42 @@ let fullScrapedData = null;
 // ========================================================
 function normalizeUrl(urlString) {
     if (!urlString) return null;
-    try {
-        const url = new URL(urlString);
-        if (url.hostname.startsWith('www.')) {
-            url.hostname = url.hostname.substring(4);
+    const trimmed = urlString.trim();
+    if (!trimmed || trimmed.toUpperCase() === 'N/A') { return null; }
+
+    const buildNormalized = (urlObj) => {
+        let hostname = urlObj.hostname;
+        if (hostname.startsWith('www.')) {
+            hostname = hostname.substring(4);
         }
-        return url.protocol + '//' + url.hostname + url.pathname + url.search + url.hash;
+        const pathname = urlObj.pathname || '/';
+        return `${urlObj.protocol}//${hostname}${pathname}${urlObj.search}${urlObj.hash}`;
+    };
+
+    try {
+        return buildNormalized(new URL(trimmed));
+    } catch (firstError) {
+        try {
+            return buildNormalized(new URL(`https://${trimmed}`));
+        } catch (secondError) {
+            return trimmed;
+        }
+    }
+}
+
+function extractHostname(urlString) {
+    if (!urlString) return null;
+    const trimmed = urlString.trim();
+    if (!trimmed) return null;
+    try {
+        const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+        let hostname = url.hostname;
+        if (hostname.startsWith('www.')) {
+            hostname = hostname.substring(4);
+        }
+        return hostname;
     } catch (e) {
-        return urlString;
+        return trimmed.replace(/^www\./, '');
     }
 }
 
@@ -198,17 +226,26 @@ async function getLinksAndFilter() {
         });
     }
     
-    const whitelistedDomains = flatWhitelist.map(url => {
-        try {
-            let hostname = new URL(url).hostname;
-            if (hostname.startsWith('www.')) {
-                hostname = hostname.substring(4);
+    const whitelistedUrlSet = new Set();
+    const whitelistedHostSet = new Set();
+    flatWhitelist.forEach(url => {
+        const trimmedUrl = (url || '').trim();
+        if (trimmedUrl) {
+            whitelistedUrlSet.add(trimmedUrl);
+            const trimmedHost = extractHostname(trimmedUrl);
+            if (trimmedHost) {
+                whitelistedHostSet.add(trimmedHost);
             }
-            return hostname;
-        } catch (e) {
-            return null;
         }
-    }).filter(Boolean);
+        const normalizedUrl = normalizeUrl(trimmedUrl);
+        if (normalizedUrl) {
+            whitelistedUrlSet.add(normalizedUrl);
+            const normalizedHost = extractHostname(normalizedUrl);
+            if (normalizedHost) {
+                whitelistedHostSet.add(normalizedHost);
+            }
+        }
+    });
 
     resultsDiv.innerHTML = 'Mengambil link dari halaman SERP...';
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -225,16 +262,22 @@ async function getLinksAndFilter() {
     const scrapeResult = injectionResults[0].result;
     if (scrapeResult) {
         scrapeResult.links = scrapeResult.links.filter(linkItem => {
-            try {
-                let mainLinkHostname = new URL(linkItem.mainLink).hostname;
-                if (mainLinkHostname.startsWith('www.')) {
-                    mainLinkHostname = mainLinkHostname.substring(4);
-                }
-                const isWhitelisted = whitelistedDomains.some(whitelistedDomain => mainLinkHostname.includes(whitelistedDomain));
-                return !isWhitelisted;
-            } catch (e) {
-                return true;
-            }
+            const rawMainLink = (linkItem.mainLink || '').trim();
+            const rawAmpLink = (linkItem.ampLink || '').trim();
+            const normalizedMainLink = normalizeUrl(rawMainLink);
+            const normalizedAmpLink = normalizeUrl(rawAmpLink);
+            const mainHostname = extractHostname(rawMainLink);
+            const ampHostname = extractHostname(rawAmpLink);
+
+            const isWhitelisted =
+                (normalizedMainLink && whitelistedUrlSet.has(normalizedMainLink)) ||
+                (normalizedAmpLink && whitelistedUrlSet.has(normalizedAmpLink)) ||
+                (rawMainLink && whitelistedUrlSet.has(rawMainLink)) ||
+                (rawAmpLink && whitelistedUrlSet.has(rawAmpLink)) ||
+                (mainHostname && whitelistedHostSet.has(mainHostname)) ||
+                (ampHostname && whitelistedHostSet.has(ampHostname));
+
+            return !isWhitelisted;
         });
         
         fullScrapedData = scrapeResult;
@@ -313,13 +356,16 @@ function visitLink(event) {
 async function whitelistLink(event) {
     const user = auth.currentUser;
     if (!user) return;
-    const urlToWhitelist = event.target.dataset.url;
+    const urlToWhitelist = (event.target.dataset.url || '').trim();
     if (!urlToWhitelist) return;
+    const normalizedUrl = normalizeUrl(urlToWhitelist);
+    const hostnameOnly = extractHostname(normalizedUrl || urlToWhitelist);
+    const valueToSave = hostnameOnly || normalizedUrl || urlToWhitelist;
     const { scrapeData } = await chrome.storage.local.get('scrapeData');
     const queryAsCategory = scrapeData ? scrapeData.query.trim() : "Umum";
     const docRef = db.collection("whitelists").doc(user.uid);
     const updateData = {};
-    updateData[queryAsCategory] = firebase.firestore.FieldValue.arrayUnion(urlToWhitelist);
+    updateData[queryAsCategory] = firebase.firestore.FieldValue.arrayUnion(valueToSave);
     await docRef.set(updateData, { merge: true });
     event.target.textContent = '✅';
     event.target.disabled = true;
