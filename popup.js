@@ -1,25 +1,125 @@
 // ===================================================================
-// PASTE KONFIGURASI FIREBASE ANDA DI SINI
+// OVH API CONFIG (Web Cloud)
 // ===================================================================
-const firebaseConfig = {
-    apiKey: "AIzaSyBDHk3eB7X1XekK6zdEGZbdNxCG8N3ht_U",
-    authDomain: "phising-checker.firebaseapp.com",
-    projectId: "phising-checker",
-    storageBucket: "phising-checker.firebasestorage.app",
-    messagingSenderId: "927232129051",
-    appId: "1:927232129051:web:7e50c08624625b2beaa0be",
+// Ganti ini dengan domain API di hosting OVH Anda
+const API_BASE = 'https://saligia.app/api'; // contoh: https://example.com/api
+
+// Shim minimal untuk kompatibilitas kode lama yang memakai Firebase FieldValue
+const firebase = {
+    firestore: {
+        FieldValue: {
+            arrayUnion: (...items) => ({ _op: 'union', items }),
+            arrayRemove: (...items) => ({ _op: 'remove', items })
+        }
+    }
 };
 
-// ===================================================================
-// PASTE KONFIGURASI SUPABASE ANDA DI SINI
-// ===================================================================
-const SUPABASE_URL = 'https://tuzgfymuoopfyfdusoge.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1emdmeW11b29wZnlmZHVzb2dlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NDQ4MDMsImV4cCI6MjA3MzMyMDgwM30.nzg9KJN0OKrr2bqPGc1GQ39UzXpRryopxBS9kDSQ0gM';
+// Penyimpanan token + helper fetch
+let apiToken = null;
+let currentUser = null; // { uid, email }
+let authReady = false; // UI hanya berubah setelah ini true
+// Menyimpan keyword id aktif untuk whitelist; harus dideklarasikan agar aman saat popup re-open
+let currentKeywordId = null;
+// Menandai transisi logout agar UI menampilkan overlay yang rapi
+let pendingLogout = false;
+let pendingLogin = false;
 
-// --- Inisialisasi Firebase ---
-firebase.initializeApp(firebaseConfig);
-const auth = firebase.auth();
-const db = firebase.firestore();
+async function loadToken() {
+    const { apiToken: t } = await chrome.storage.local.get('apiToken');
+    apiToken = t || null;
+}
+
+async function saveToken(t) {
+    apiToken = t;
+    if (t) {
+        await chrome.storage.local.set({ apiToken: t });
+    } else {
+        await chrome.storage.local.remove('apiToken');
+    }
+}
+
+async function apiRequest(path, { method = 'GET', body = null } = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
+    const res = await fetch(`${API_BASE}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : null,
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`API ${method} ${path} gagal: ${res.status} ${text}`);
+    }
+    return res.json();
+}
+
+// API wrapper
+async function apiLogin(email, password) {
+    const data = await apiRequest('/auth/login', { method: 'POST', body: { email, password } });
+    // Harapkan response: { token, user: { id, email } }
+    await saveToken(data.token);
+    currentUser = { uid: data.user.id, email: data.user.email };
+    return currentUser;
+}
+
+async function apiLogout() {
+    await saveToken(null);
+    currentUser = null;
+}
+
+async function apiMe() {
+    if (!apiToken) return null;
+    try {
+        const data = await apiRequest('/auth/me'); // { id, email }
+        currentUser = { uid: data.id, email: data.email };
+        return currentUser;
+    } catch {
+        await saveToken(null);
+        return null;
+    }
+}
+
+// Keywords + Whitelist by keyword_id (sesuai skema MySQL Anda)
+async function apiUpsertKeyword(keyword) {
+    return apiRequest('/keywords/upsert', { method: 'POST', body: { keyword } }); // -> { id, keyword }
+}
+
+async function apiListKeywords() {
+    return apiRequest('/keywords'); // -> [ { id, keyword, count } ]
+}
+
+async function apiGetWhitelist(keywordId) {
+    return apiRequest(`/whitelist?keyword_id=${encodeURIComponent(keywordId)}`); // -> [ { url, domain, note } ]
+}
+
+async function apiAddWhitelistByKeyword(keywordId, urls) {
+    return apiRequest('/whitelist/add', { method: 'POST', body: { keyword_id: keywordId, urls } });
+}
+
+async function apiRemoveWhitelistByKeyword(keywordId, url) {
+    return apiRequest('/whitelist/remove', { method: 'POST', body: { keyword_id: keywordId, url } });
+}
+
+// Shim auth/db agar kode lama tetap bekerja dengan perubahan minimal
+const auth = {
+    _listeners: [],
+    get currentUser() { return currentUser; },
+    async signInWithEmailAndPassword(email, password) {
+        await apiLogin(email, password);
+        this._notify();
+    },
+    async signOut() {
+        await apiLogout();
+        this._notify();
+    },
+    onAuthStateChanged(cb) {
+        this._listeners.push(cb);
+        cb(currentUser);
+    },
+    _notify() { this._listeners.forEach(cb => cb(currentUser)); }
+};
+
+// db shim tak lagi digunakan untuk whitelist; dibiarkan kosong bila diperlukan di masa depan
 
 // --- Dapatkan semua elemen dari DOM ---
 const getLinksButton = document.getElementById('getLinksButton');
@@ -45,6 +145,51 @@ const loadingMessage = document.getElementById('loadingMessage');
 const container = document.querySelector('.container');
 
 let fullScrapedData = null;
+
+// Inisialisasi auth dari token tersimpan
+(async () => {
+    await loadToken();
+    await apiMe();
+    // Beri tahu listener jika status user berubah setelah pemuatan token
+    if (typeof auth !== 'undefined' && auth._notify) {
+        authReady = true;
+        auth._notify();
+    }
+})();
+
+// ========================================================
+// CACHE SEDERHANA (TTL) UNTUK WHITELIST
+// ========================================================
+async function getWhitelistWithCache(keywordId) {
+    if (!keywordId) return [];
+    const { whitelistCache = {} } = await chrome.storage.local.get('whitelistCache');
+    const now = Date.now();
+    const TTL = 10 * 60 * 1000; // 10 menit
+    const entry = whitelistCache[String(keywordId)];
+    if (entry && (now - entry.ts) < TTL) {
+        return Array.isArray(entry.items) ? entry.items : [];
+    }
+    const items = await apiGetWhitelist(keywordId);
+    whitelistCache[String(keywordId)] = { items, ts: now };
+    await chrome.storage.local.set({ whitelistCache });
+    return Array.isArray(items) ? items : [];
+}
+
+async function getUmumKeywordIdCached() {
+    const { umumKeywordIdCache } = await chrome.storage.local.get('umumKeywordIdCache');
+    const now = Date.now();
+    const TTL = 24 * 60 * 60 * 1000; // 24 jam
+    if (umumKeywordIdCache && (now - (umumKeywordIdCache.ts || 0)) < TTL) {
+        return umumKeywordIdCache.id || null;
+    }
+    const keywords = await apiListKeywords().catch(() => []);
+    const umumEntry = Array.isArray(keywords)
+        ? keywords.find(k => (k.keyword || '').trim().toLowerCase() === 'umum')
+        : null;
+    const id = umumEntry ? umumEntry.id : null;
+    await chrome.storage.local.set({ umumKeywordIdCache: { id, ts: now } });
+    return id;
+}
 
 // ========================================================
 // FUNGSI HELPER
@@ -88,6 +233,21 @@ function extractHostname(urlString) {
     } catch (e) {
         return trimmed.replace(/^www\./, '');
     }
+}
+
+// Cocokkan host terhadap set whitelist, termasuk subdomain.
+function hostInSet(hostname, set) {
+    if (!hostname || !set) return false;
+    let h = String(hostname).toLowerCase();
+    if (set.has(h)) return true;
+    // Naikkan ke parent domain (id.linkedin.com -> linkedin.com)
+    let dot = h.indexOf('.');
+    while (dot > 0) {
+        h = h.substring(dot + 1);
+        if (set.has(h)) return true;
+        dot = h.indexOf('.');
+    }
+    return false;
 }
 
 // ========================================================
@@ -212,42 +372,9 @@ function scrapeDataOnPage() {
 }
 
 async function getLinksAndFilter() {
-    resultsDiv.innerHTML = 'Mengambil whitelist dari server...';
+    resultsDiv.innerHTML = 'Mengambil link dari halaman SERP...';
     const user = auth.currentUser;
     if (!user) { alert("Anda harus login terlebih dahulu."); return; }
-
-    const docRef = db.collection("whitelists").doc(user.uid);
-    const docSnap = await docRef.get();
-    let flatWhitelist = [];
-    if (docSnap.exists) {
-        const categories = docSnap.data();
-        Object.values(categories).forEach(urlArray => {
-            if(Array.isArray(urlArray)) flatWhitelist.push(...urlArray);
-        });
-    }
-    
-    const whitelistedUrlSet = new Set();
-    const whitelistedHostSet = new Set();
-    flatWhitelist.forEach(url => {
-        const trimmedUrl = (url || '').trim();
-        if (trimmedUrl) {
-            whitelistedUrlSet.add(trimmedUrl);
-            const trimmedHost = extractHostname(trimmedUrl);
-            if (trimmedHost) {
-                whitelistedHostSet.add(trimmedHost);
-            }
-        }
-        const normalizedUrl = normalizeUrl(trimmedUrl);
-        if (normalizedUrl) {
-            whitelistedUrlSet.add(normalizedUrl);
-            const normalizedHost = extractHostname(normalizedUrl);
-            if (normalizedHost) {
-                whitelistedHostSet.add(normalizedHost);
-            }
-        }
-    });
-
-    resultsDiv.innerHTML = 'Mengambil link dari halaman SERP...';
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab.url || !tab.url.includes("google.com/search")) {
         resultsDiv.innerHTML = '<div class="error">Hanya berfungsi di halaman Google Search.</div>';
@@ -261,6 +388,54 @@ async function getLinksAndFilter() {
 
     const scrapeResult = injectionResults[0].result;
     if (scrapeResult) {
+        const activeQuery = (scrapeResult.query || '').trim();
+        try {
+            const up = await apiUpsertKeyword(activeQuery || 'Umum');
+            currentKeywordId = up.id;
+        } catch (e) {
+            console.error('Gagal upsert keyword:', e);
+            resultsDiv.innerHTML = '<div class="error">Gagal mendaftarkan keyword di server.</div>';
+            return;
+        }
+
+        let flatWhitelist = [];
+        try {
+            // 1) Ambil whitelist untuk kueri aktif (dengan cache)
+            const wlActive = await getWhitelistWithCache(currentKeywordId);
+            flatWhitelist = Array.isArray(wlActive) ? wlActive.map(x => x.url || x.domain || '').filter(Boolean) : [];
+
+            // 2) Tambah whitelist "umum" (global) bila ada (cache)
+            const umumId = await getUmumKeywordIdCached();
+            if (umumId && umumId !== currentKeywordId) {
+                const wlUmum = await getWhitelistWithCache(umumId);
+                const extra = Array.isArray(wlUmum) ? wlUmum.map(x => x.url || x.domain || '').filter(Boolean) : [];
+                flatWhitelist = flatWhitelist.concat(extra);
+            }
+        } catch (e) {
+            console.error('Gagal mengambil whitelist:', e);
+        }
+
+        const whitelistedUrlSet = new Set();
+        const whitelistedHostSet = new Set();
+        flatWhitelist.forEach(url => {
+            const trimmedUrl = (url || '').trim();
+            if (trimmedUrl) {
+                whitelistedUrlSet.add(trimmedUrl);
+                const trimmedHost = extractHostname(trimmedUrl);
+                if (trimmedHost) {
+                    whitelistedHostSet.add(trimmedHost);
+                }
+            }
+            const normalizedUrl = normalizeUrl(trimmedUrl);
+            if (normalizedUrl) {
+                whitelistedUrlSet.add(normalizedUrl);
+                const normalizedHost = extractHostname(normalizedUrl);
+                if (normalizedHost) {
+                    whitelistedHostSet.add(normalizedHost);
+                }
+            }
+        });
+
         scrapeResult.links = scrapeResult.links.filter(linkItem => {
             const rawMainLink = (linkItem.mainLink || '').trim();
             const rawAmpLink = (linkItem.ampLink || '').trim();
@@ -274,8 +449,8 @@ async function getLinksAndFilter() {
                 (normalizedAmpLink && whitelistedUrlSet.has(normalizedAmpLink)) ||
                 (rawMainLink && whitelistedUrlSet.has(rawMainLink)) ||
                 (rawAmpLink && whitelistedUrlSet.has(rawAmpLink)) ||
-                (mainHostname && whitelistedHostSet.has(mainHostname)) ||
-                (ampHostname && whitelistedHostSet.has(ampHostname));
+                hostInSet(mainHostname, whitelistedHostSet) ||
+                hostInSet(ampHostname, whitelistedHostSet);
 
             return !isWhitelisted;
         });
@@ -294,15 +469,17 @@ async function getLinksAndFilter() {
 // LOGIKA TOMBOL & AKSI
 // ========================================================
 auth.onAuthStateChanged(user => {
-    setTimeout(() => {
-        if (user) {
-            showLoggedInState(user);
-        } else {
-            showLoggedOutState();
-        }
-        loadingOverlay.classList.add('hidden');
-        container.style.visibility = 'visible';
-    }, 2000);
+    // Jangan mengubah UI sebelum status auth siap agar tidak mem-flash login form
+    if (!authReady) return;
+    // Saat logout sedang berlangsung, biarkan overlay tetap tampil hingga handler menyelesaikan
+    if (pendingLogout || pendingLogin) return;
+    if (user) {
+        showLoggedInState(user);
+    } else {
+        showLoggedOutState();
+    }
+    loadingOverlay.classList.add('hidden');
+    container.style.visibility = 'visible';
 });
 
 loginButton.addEventListener('click', () => {
@@ -313,27 +490,78 @@ loginButton.addEventListener('click', () => {
         return;
     }
 
+    pendingLogin = true;
     container.style.visibility = 'hidden';
     loadingMessage.textContent = "Menyambungkan...";
     loadingOverlay.classList.remove('hidden');
 
     auth.signInWithEmailAndPassword(email, password)
-        .catch((error) => {
+        .then(async () => {
+            // Tampilkan countdown sukses sebelum masuk
+            try { loadingMessage.classList.remove('loading-error'); } catch {}
+            loadingMessage.classList.add('loading-success');
+            await runCountdown('Login berhasil. Anda akan diarahkan masuk ke aplikasi dalam', 3);
+            showLoggedInState(currentUser);
             loadingOverlay.classList.add('hidden');
             container.style.visibility = 'visible';
-            alert("Login Gagal: " + error.message);
+            pendingLogin = false;
+        })
+        .catch(async (error) => {
+            const msg = (error && error.message ? String(error.message) : '').toLowerCase();
+            let friendly = 'Terjadi kesalahan saat login.';
+            if (msg.includes('401') || msg.includes('invalid_credentials')) {
+                friendly = 'Email atau Password yang Anda masukkan salah. Anda akan diarahkan kembali ke halaman login dalam';
+            }
+            try { loadingMessage.classList.remove('loading-success'); } catch {}
+            loadingMessage.classList.add('loading-error');
+            await runCountdown(friendly, 3);
+            passwordInput.value = '';
+            showLoggedOutState();
+            loadingOverlay.classList.add('hidden');
+            container.style.visibility = 'visible';
+            pendingLogin = false;
         });
 });
 
+// Helper: tampilkan hitung mundur 3..2..1 dalam overlay
+async function runCountdown(prefixText, seconds) {
+    return new Promise((resolve) => {
+        let left = seconds;
+        const update = () => {
+            loadingMessage.textContent = `${prefixText} ${left}`;
+        };
+        update();
+        const iv = setInterval(() => {
+            left -= 1;
+            if (left <= 0) {
+                clearInterval(iv);
+                resolve();
+            } else {
+                update();
+            }
+        }, 1000);
+    });
+}
+
 logoutButton.addEventListener('click', () => {
+    pendingLogout = true;
     container.style.visibility = 'hidden';
-    loadingMessage.textContent = "Memutuskan koneksi...";
+    loadingMessage.textContent = "Mengakhiri sesi...";
     loadingOverlay.classList.remove('hidden');
 
-    auth.signOut().then(() => {
-        chrome.storage.local.remove('scrapeData');
+    auth.signOut().then(async () => {
+        // Bersihkan data lokal
+        await chrome.storage.local.remove(['scrapeData', 'whitelistCache', 'umumKeywordIdCache', 'apiToken']);
         fullScrapedData = null;
+        currentKeywordId = null;
         filterInput.value = '';
+        // Tampilkan layar selesai secara halus
+        setTimeout(() => {
+            showLoggedOutState();
+            loadingOverlay.classList.add('hidden');
+            container.style.visibility = 'visible';
+            pendingLogout = false;
+        }, 600);
     });
 });
 
@@ -362,11 +590,20 @@ async function whitelistLink(event) {
     const hostnameOnly = extractHostname(normalizedUrl || urlToWhitelist);
     const valueToSave = hostnameOnly || normalizedUrl || urlToWhitelist;
     const { scrapeData } = await chrome.storage.local.get('scrapeData');
-    const queryAsCategory = scrapeData ? scrapeData.query.trim() : "Umum";
-    const docRef = db.collection("whitelists").doc(user.uid);
-    const updateData = {};
-    updateData[queryAsCategory] = firebase.firestore.FieldValue.arrayUnion(valueToSave);
-    await docRef.set(updateData, { merge: true });
+    const queryAsCategory = scrapeData ? (scrapeData.query || '').trim() : 'Umum';
+    if (!currentKeywordId) {
+        try {
+            const up = await apiUpsertKeyword(queryAsCategory);
+            currentKeywordId = up.id;
+        } catch {}
+    }
+    await apiAddWhitelistByKeyword(currentKeywordId, [valueToSave]);
+    try {
+        const store = await chrome.storage.local.get('whitelistCache');
+        const cache = store.whitelistCache || {};
+        delete cache[String(currentKeywordId)];
+        await chrome.storage.local.set({ whitelistCache: cache });
+    } catch {}
     event.target.textContent = '✅';
     event.target.disabled = true;
 }
@@ -379,16 +616,7 @@ async function viewWhitelist() {
     resetButton.classList.add('hidden');
     filterContainer.classList.add('hidden');
     searchQueryDisplay.classList.add('hidden');
-    const docRef = db.collection("whitelists").doc(user.uid);
-    let docSnap = await docRef.get();
-    
-    if (docSnap.exists && Array.isArray(docSnap.data().urls)) {
-        const oldUrls = docSnap.data().urls;
-        await docRef.set({ "Umum": oldUrls });
-        docSnap = await docRef.get();
-    }
-    
-    const categories = docSnap.exists ? docSnap.data() : {};
+    const keywords = await apiListKeywords();
 
     let htmlResult = `
         <div class="whitelist-manager-container">
@@ -464,22 +692,18 @@ async function bulkAddToWhitelist() {
     }
     const urlsToAdd = urlsText.split('\n').map(u => u.trim()).filter(u => u);
     if (urlsToAdd.length === 0) return;
-    const docRef = db.collection("whitelists").doc(user.uid);
-    const updateData = {};
-    updateData[queryAsCategory] = firebase.firestore.FieldValue.arrayUnion(...urlsToAdd);
-    await docRef.set(updateData, { merge: true });
-    viewWhitelist();
+    const up = await apiUpsertKeyword(queryAsCategory);
+    await apiAddWhitelistByKeyword(up.id, urlsToAdd);
+    renderWhitelistManager();
 }
 
 async function removeFromWhitelist(url, category) {
     const user = auth.currentUser;
     if (!user) return;
-    const docRef = db.collection("whitelists").doc(user.uid);
-    const updateData = {};
-    updateData[category] = firebase.firestore.FieldValue.arrayRemove(url);
-    await docRef.update(updateData);
+    const up = await apiUpsertKeyword(category);
+    await apiRemoveWhitelistByKeyword(up.id, url);
 }
-viewWhitelistButton.addEventListener('click', viewWhitelist);
+viewWhitelistButton.addEventListener('click', renderWhitelistManager);
 
 function copyReport() {
     chrome.storage.local.get('scrapeData', ({ scrapeData }) => {
@@ -545,13 +769,34 @@ function filterResults() {
 }
 filterInput.addEventListener('input', filterResults);
 
-function filterWhitelist(event) {
-    const searchTerm = event.target.value.trim().toLowerCase();
+async function filterWhitelist(event) {
+    const inputEl = document.getElementById('whitelistSearchInput');
+    const searchTerm = (event && event.target ? event.target.value : (inputEl ? inputEl.value : ''))
+        .trim().toLowerCase();
     const allItems = document.querySelectorAll('.accordion-item');
 
-    allItems.forEach(item => {
+    for (const item of allItems) {
         const header = item.querySelector('.accordion-header');
         const content = item.querySelector('.accordion-content');
+
+        // Jika sedang mencari dan konten belum dimuat, lazy-load dulu agar bisa ikut tersaring
+        if (searchTerm && content && content.dataset.loaded !== 'true') {
+            try {
+                const kid = parseInt(header.dataset.keywordId, 10);
+                const items = await getWhitelistWithCache(kid);
+                const html = (Array.isArray(items) ? items : [])
+                    .map(row => {
+                        const val = (row && (row.url || row.domain)) ? (row.url || row.domain) : '';
+                        if (!val) return '';
+                        return `<div class="whitelist-item"><span>${val}</span><button class="remove-whitelist-button" data-url="${val}" data-keyword-id="${kid}" title="Hapus">Hapus</button></div>`;
+                    })
+                    .join('');
+                content.innerHTML = html;
+                content.dataset.loaded = 'true';
+                try { await filterWhitelist(); } catch {}
+            } catch {}
+        }
+
         const rows = Array.from(content.querySelectorAll('.whitelist-item'));
 
         if (!searchTerm) {
@@ -566,7 +811,7 @@ function filterWhitelist(event) {
             } else {
                 content.style.maxHeight = null;
             }
-            return;
+            continue;
         }
 
         const categoryMatch = header.textContent.toLowerCase().includes(searchTerm);
@@ -597,8 +842,135 @@ function filterWhitelist(event) {
         } else {
             item.style.display = 'none';
         }
-    });
+    }
 }
 
 // Inisialisasi Tampilan Awal
-showLoggedOutState();
+// Jangan paksa state logout di awal; biarkan overlay tampil
+// sampai auth.onAuthStateChanged memutuskan state sebenarnya.
+
+// Tampilan whitelist berbasis keywords (sesuai skema MySQL)
+async function renderWhitelistManager() {
+    const user = auth.currentUser;
+    if (!user) return;
+    resultsDiv.innerHTML = 'Mengambil whitelist dari server...';
+    copyContainer.classList.add('hidden');
+    resetButton.classList.add('hidden');
+    filterContainer.classList.add('hidden');
+    searchQueryDisplay.classList.add('hidden');
+    const prevSearch = (document.getElementById('whitelistSearchInput')?.value || '').trim();
+
+    const keywords = await apiListKeywords();
+
+    let htmlResult = `
+        <div class="whitelist-manager-container">
+            <div class="bulk-add-section">
+                <h4>Tambah Link Massal (Bulk)</h4>
+                <textarea id="bulkWhitelistInput" placeholder="Tempel daftar link di sini, satu link per baris..."></textarea>
+                <div class="bulk-add-controls">
+                    <input type="text" id="bulkQueryInput" placeholder="Nama Kueri untuk Kategori">
+                    <button id="bulkAddButton">Tambahkan</button>
+                </div>
+            </div>
+            <input type="text" id="whitelistSearchInput" placeholder="Cari di dalam whitelist...">
+            <div class="accordion-container"></div>
+        </div>
+    `;
+    resultsDiv.innerHTML = htmlResult;
+    if (prevSearch) {
+        const inp = document.getElementById('whitelistSearchInput');
+        if (inp) inp.value = prevSearch;
+    }
+
+    const accordionContainer = resultsDiv.querySelector('.accordion-container');
+    if (!Array.isArray(keywords) || keywords.length === 0) {
+        accordionContainer.innerHTML = '<p>Daftar whitelist Anda masih kosong.</p>';
+    } else {
+        const frag = document.createDocumentFragment();
+        for (const kw of keywords) {
+            const accordionItem = document.createElement('div');
+            accordionItem.className = 'accordion-item';
+
+            const header = document.createElement('button');
+            header.className = 'accordion-header';
+            header.textContent = `Kueri: "${kw.keyword}" (${kw.count || 0} link)`;
+            header.dataset.keywordId = kw.id;
+
+            const content = document.createElement('div');
+            content.className = 'accordion-content';
+            content.dataset.loaded = 'false';
+
+            accordionItem.appendChild(header);
+            accordionItem.appendChild(content);
+            frag.appendChild(accordionItem);
+        }
+        accordionContainer.appendChild(frag);
+    }
+
+    document.getElementById('bulkAddButton').addEventListener('click', async () => {
+        const urlsText = document.getElementById('bulkWhitelistInput').value;
+        const queryAsCategory = document.getElementById('bulkQueryInput').value.trim();
+        if (!urlsText || !queryAsCategory) { alert('Harap isi daftar link dan nama kueri.'); return; }
+        const urlsToAdd = urlsText
+            .split('\n')
+            .map(u => u.trim())
+            .filter(Boolean)
+            .map(u => {
+                const norm = normalizeUrl(u) || u;
+                const host = extractHostname(norm) || norm;
+                return host.toLowerCase();
+            });
+        const up = await apiUpsertKeyword(queryAsCategory);
+        await apiAddWhitelistByKeyword(up.id, urlsToAdd);
+        try {
+            const store = await chrome.storage.local.get('whitelistCache');
+            const cache = store.whitelistCache || {};
+            delete cache[String(up.id)];
+            await chrome.storage.local.set({ whitelistCache: cache });
+        } catch {}
+        renderWhitelistManager();
+    });
+    document.getElementById('whitelistSearchInput').addEventListener('input', filterWhitelist);
+    if (prevSearch) { try { await filterWhitelist(); } catch {} }
+
+    // Delegasi: expand + lazy load
+    accordionContainer.addEventListener('click', async (evt) => {
+        const header = evt.target.closest('.accordion-header');
+        if (!header) return;
+        header.classList.toggle('active');
+        const content = header.nextElementSibling;
+        if (content.style.maxHeight) {
+            content.style.maxHeight = null;
+        } else {
+            if (content.dataset.loaded !== 'true') {
+                const kid = parseInt(header.dataset.keywordId, 10);
+                const items = await getWhitelistWithCache(kid);
+                const html = (Array.isArray(items) ? items : [])
+                    .map(row => {
+                        const val = (row && (row.url || row.domain)) ? (row.url || row.domain) : '';
+                        if (!val) return '';
+                        return `<div class="whitelist-item"><span>${val}</span><button class="remove-whitelist-button" data-url="${val}" data-keyword-id="${kid}" title="Hapus">Hapus</button></div>`;
+                    })
+                    .join('');
+                content.innerHTML = html;
+                content.dataset.loaded = 'true';
+            }
+            content.style.maxHeight = content.scrollHeight + 'px';
+        }
+    });
+
+    // Delegasi: hapus item
+    accordionContainer.addEventListener('click', async (evt) => {
+        const btn = evt.target.closest('.remove-whitelist-button');
+        if (!btn) return;
+        const urlToRemove = btn.dataset.url;
+        const keywordId = parseInt(btn.dataset.keywordId, 10);
+        await apiRemoveWhitelistByKeyword(keywordId, urlToRemove);
+        // Invalidasi cache untuk keyword ini
+        const store = await chrome.storage.local.get('whitelistCache');
+        const cache = store.whitelistCache || {};
+        delete cache[String(keywordId)];
+        await chrome.storage.local.set({ whitelistCache: cache });
+        renderWhitelistManager();
+    });
+}
