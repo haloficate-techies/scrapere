@@ -315,9 +315,10 @@ function renderUI(data, customEmptyMessage = null) {
                 <div style="margin-bottom: 8px;">
                     <strong style="display: block; font-size: 0.8em; color: #5f6368;">MAIN LINK:</strong>
                     <div class="link-row">
-                        <span>${linkItem.mainLink}</span>
-                        <button class="action-icon whitelist-button" data-url="${linkItem.mainLink}" title="Tambahkan ke Whitelist">➕</button>
-                        <button class="action-icon visit-link-button" data-url="${linkItem.mainLink}" title="Kunjungi Main Link">🚀</button>
+                        <span class="link-url">${linkItem.mainLink}</span>
+                        <button class="action-icon whitelist-button" data-url="${linkItem.mainLink}" title="Tambahkan ke Whitelist" aria-label="Tambahkan ke whitelist">+</button>
+                        <button class="action-icon visit-link-button" data-variant="main" data-url="${linkItem.mainLink}" title="Kunjungi Main Link" aria-label="Kunjungi main link">&#128640;</button>
+                        <span class="whitelist-status"></span>
                     </div>
                 </div>`;
         
@@ -327,9 +328,10 @@ function renderUI(data, customEmptyMessage = null) {
                 <div>
                     <strong style="display: block; font-size: 0.8em; color: #5f6368;">AMP LINK:</strong>
                     <div class="link-row">
-                        <span>${linkItem.ampLink}</span>
-                        <button class="action-icon whitelist-button" data-url="${linkItem.ampLink}" title="Tambahkan ke Whitelist">➕</button>
-                        <button class="action-icon visit-link-button" data-url="${linkItem.ampLink}" title="Kunjungi AMP Link">⚡</button>
+                        <span class="link-url">${linkItem.ampLink}</span>
+                        <button class="action-icon whitelist-button" data-url="${linkItem.ampLink}" title="Tambahkan ke Whitelist" aria-label="Tambahkan ke whitelist">+</button>
+                        <button class="action-icon visit-link-button" data-variant="amp" data-url="${linkItem.ampLink}" title="Kunjungi AMP Link" aria-label="Kunjungi AMP link">&#9889;</button>
+                        <span class="whitelist-status"></span>
                     </div>
                 </div>`;
         }
@@ -350,24 +352,137 @@ function renderUI(data, customEmptyMessage = null) {
 // ========================================================
 // LOGIKA INTI APLIKASI
 // ========================================================
-function scrapeDataOnPage() {
-    const queryInput = document.querySelector('textarea[name="q"]');
-    const query = queryInput ? queryInput.value : '';
-    const resultBlocks = document.querySelectorAll('.MjjYud');
-    const scrapedData = [];
-    for (const block of resultBlocks) {
-        const linkElement = block.querySelector('h3 a') || block.querySelector('.yuRUbf a') || block.querySelector('a');
-        const titleElement = block.querySelector('h3, div[role="heading"][aria-level="3"]'); 
+async function scrapeDataOnPage() {
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const loadMoreLabels = [
+        'hasil penelusuran lainnya',
+        'lihat hasil lain',
+        'lihat hasil penelusuran lainnya',
+        'more results',
+        'more search results',
+        'load more results'
+    ];
+    const buttonAttempts = new WeakMap();
 
-        if (linkElement) {
-            const title = titleElement ? titleElement.innerText.trim() : 'Judul tidak ditemukan';
-            scrapedData.push({ 
-                title: title,
-                mainLink: linkElement.href, 
-                ampLink: linkElement.getAttribute('data-amp') 
-            });
+    const labelMatches = (text) => {
+        if (!text) return false;
+        return loadMoreLabels.some(label => text === label || text.startsWith(`${label} `));
+    };
+
+    const isElementVisible = (el) => {
+        if (!el) return false;
+        if (el.offsetParent === null) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (!style) return true;
+        if (style.visibility === 'hidden' || style.display === 'none') return false;
+        if (parseFloat(style.opacity || '1') === 0) return false;
+        return true;
+    };
+
+    const queryInput = document.querySelector('textarea[name="q"], input[name="q"]');
+    const query = queryInput ? queryInput.value : '';
+
+    const getResultBlocks = () => {
+        const blocks = Array.from(document.querySelectorAll('.MjjYud'));
+        return blocks.length > 0 ? blocks : Array.from(document.querySelectorAll('.g'));
+    };
+
+    const findLoadMoreButton = () => {
+        const selectors = 'button, a[role="button"], div[role="button"], span[role="button"]';
+        const candidates = Array.from(document.querySelectorAll(selectors));
+        return candidates.find((el) => {
+            if (el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled')) return false;
+            const text = normalize(el.innerText || el.textContent);
+            const aria = normalize(el.getAttribute('aria-label') || '');
+            const matched = labelMatches(text) || labelMatches(aria);
+            if (!matched) return false;
+            if (!isElementVisible(el)) return false;
+            const tries = buttonAttempts.get(el) || 0;
+            if (tries >= 5) return false;
+            return true;
+        }) || null;
+    };
+
+    const waitForNewResults = async (previousCount, previousHeight) => {
+        const maxWaitMs = 7000;
+        const tickMs = 250;
+        const start = performance.now();
+        while ((performance.now() - start) < maxWaitMs) {
+            await sleep(tickMs);
+            const currentCount = getResultBlocks().length;
+            const currentHeight = document.documentElement ? document.documentElement.scrollHeight : document.body.scrollHeight;
+            if (currentCount > previousCount || currentHeight > previousHeight + 50) {
+                return 'grown';
+            }
         }
+        return 'timeout';
+    };
+
+    // Automatically expand "More results" sections on mobile SERP
+    for (let clickAttempts = 0; clickAttempts < 30; clickAttempts++) {
+        const button = findLoadMoreButton();
+        if (!button) break;
+
+        const previousCount = getResultBlocks().length;
+        const previousHeight = document.documentElement ? document.documentElement.scrollHeight : document.body.scrollHeight;
+        let success = false;
+        for (let retry = 0; retry < 5; retry++) {
+            buttonAttempts.set(button, (buttonAttempts.get(button) || 0) + 1);
+            button.scrollIntoView({ block: 'center' });
+            button.dataset.scrapereAutoload = 'true';
+            button.click();
+            const waitResult = await waitForNewResults(previousCount, previousHeight);
+            if (waitResult === 'grown') {
+                success = true;
+                buttonAttempts.delete(button);
+                break;
+            }
+            await sleep(200);
+            if (!document.contains(button) || !isElementVisible(button)) {
+                break;
+            }
+        }
+
+        if (!success) {
+            const anotherButton = findLoadMoreButton();
+            if (!anotherButton) {
+                break;
+            }
+            if (anotherButton === button && (buttonAttempts.get(button) || 0) >= 5) {
+                break;
+            }
+            continue;
+        }
+
+        await sleep(200);
     }
+
+    const scrapedData = [];
+    const seenLinks = new Set();
+    for (const block of getResultBlocks()) {
+        const linkElement =
+            block.querySelector('h3 a') ||
+            block.querySelector('.yuRUbf a') ||
+            block.querySelector('a');
+        const titleElement = block.querySelector('h3, div[role="heading"][aria-level="3"]');
+
+        if (!linkElement || !linkElement.href) continue;
+
+        const mainLink = linkElement.href;
+        if (seenLinks.has(mainLink)) continue;
+        seenLinks.add(mainLink);
+
+        const title = titleElement ? titleElement.innerText.trim() : 'Judul tidak ditemukan';
+        scrapedData.push({
+            title: title,
+            mainLink,
+            ampLink: linkElement.getAttribute('data-amp')
+        });
+    }
+
     return { query, links: scrapedData };
 }
 
@@ -584,29 +699,111 @@ function visitLink(event) {
 async function whitelistLink(event) {
     const user = auth.currentUser;
     if (!user) return;
-    const urlToWhitelist = (event.target.dataset.url || '').trim();
-    if (!urlToWhitelist) return;
+    const button = event.currentTarget || event.target;
+    if (!button) return;
+    const state = button.dataset.pending;
+    if (state === 'busy' || state === 'done') return;
+
+    if (!button.dataset.iconContent) {
+        button.dataset.iconContent = button.innerHTML;
+    } else if (button.innerHTML !== button.dataset.iconContent) {
+        button.innerHTML = button.dataset.iconContent;
+    }
+
+    const row = button.closest('.link-row');
+    const statusEl = row ? row.querySelector('.whitelist-status') : null;
+    const setStatus = (variant, text) => {
+        if (!statusEl) return;
+        statusEl.textContent = text || '';
+        statusEl.classList.remove('active', 'progress', 'success', 'info', 'error');
+        if (text) {
+            statusEl.classList.add('active');
+            if (variant) statusEl.classList.add(variant);
+        }
+    };
+    const resetClasses = () => {
+        button.classList.remove('is-loading', 'is-success', 'is-info', 'is-error');
+    };
+
+    button.dataset.pending = 'busy';
+    button.disabled = true;
+    resetClasses();
+    button.classList.add('is-loading');
+    setStatus('progress', 'Menambahkan...');
+
+    const urlToWhitelist = (button.dataset.url || '').trim();
+    if (!urlToWhitelist) {
+        resetClasses();
+        button.disabled = false;
+        delete button.dataset.pending;
+        setStatus('error', 'URL tidak valid');
+        return;
+    }
     const normalizedUrl = normalizeUrl(urlToWhitelist);
     const hostnameOnly = extractHostname(normalizedUrl || urlToWhitelist);
-    const valueToSave = hostnameOnly || normalizedUrl || urlToWhitelist;
-    const { scrapeData } = await chrome.storage.local.get('scrapeData');
-    const queryAsCategory = scrapeData ? (scrapeData.query || '').trim() : 'Umum';
-    if (!currentKeywordId) {
-        try {
+    const normalizedHost = hostnameOnly ? hostnameOnly.toLowerCase() : null;
+    const valueToSave = (normalizedHost || normalizedUrl || urlToWhitelist).trim();
+    const valueToSaveLower = valueToSave.toLowerCase();
+
+    try {
+        const { scrapeData } = await chrome.storage.local.get('scrapeData');
+        const queryAsCategory = scrapeData ? (scrapeData.query || '').trim() : 'Umum';
+        if (!currentKeywordId) {
             const up = await apiUpsertKeyword(queryAsCategory);
             currentKeywordId = up.id;
-        } catch {}
+        }
+
+        let alreadyExists = false;
+        try {
+            const existingItems = await getWhitelistWithCache(currentKeywordId);
+            if (Array.isArray(existingItems)) {
+                alreadyExists = existingItems.some(item => {
+                    const raw = item && (item.url || item.domain) ? String(item.url || item.domain).trim() : '';
+                    if (!raw) return false;
+                    if (normalizedHost) {
+                        const existingHost = extractHostname(raw);
+                        if (existingHost && existingHost.toLowerCase() === normalizedHost) {
+                            return true;
+                        }
+                    }
+                    return raw.toLowerCase() === valueToSaveLower;
+                });
+            }
+        } catch (cacheErr) {
+            console.warn('Gagal memeriksa whitelist lokal:', cacheErr);
+        }
+
+        if (alreadyExists) {
+            resetClasses();
+            button.dataset.pending = 'done';
+            button.classList.add('is-info');
+            setStatus('info', 'Sudah ada');
+            return;
+        }
+
+        await apiAddWhitelistByKeyword(currentKeywordId, [valueToSave]);
+        try {
+            const store = await chrome.storage.local.get('whitelistCache');
+            const cache = store.whitelistCache || {};
+            delete cache[String(currentKeywordId)];
+            await chrome.storage.local.set({ whitelistCache: cache });
+        } catch (invalidateErr) {
+            console.warn('Gagal menghapus cache whitelist:', invalidateErr);
+        }
+        resetClasses();
+        button.dataset.pending = 'done';
+        button.classList.add('is-success');
+        setStatus('success', 'Ditambahkan');
+    } catch (err) {
+        console.error('Gagal menambahkan ke whitelist:', err);
+        resetClasses();
+        button.classList.add('is-error');
+        button.disabled = false;
+        delete button.dataset.pending;
+        setStatus('error', 'Gagal, coba lagi');
     }
-    await apiAddWhitelistByKeyword(currentKeywordId, [valueToSave]);
-    try {
-        const store = await chrome.storage.local.get('whitelistCache');
-        const cache = store.whitelistCache || {};
-        delete cache[String(currentKeywordId)];
-        await chrome.storage.local.set({ whitelistCache: cache });
-    } catch {}
-    event.target.textContent = '✅';
-    event.target.disabled = true;
 }
+
 
 async function viewWhitelist() {
     const user = auth.currentUser;
@@ -974,3 +1171,8 @@ async function renderWhitelistManager() {
         renderWhitelistManager();
     });
 }
+
+
+
+
+

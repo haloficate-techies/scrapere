@@ -198,11 +198,28 @@ button:hover {
 .result-item { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #eee; }
 .result-item:last-child { border-bottom: none; }
 .result-item strong { display: block; color: #333; margin-bottom: 5px; font-size: 13px; }
-.result-item span { color: #006621; font-family: monospace; overflow-wrap: break-word; word-break: break-all; }
+.result-item .link-url { color: #006621; font-family: monospace; overflow-wrap: break-word; word-break: break-all; }
 .error { color: #d93025; font-weight: bold; }
 
 .link-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.link-row span { flex-grow: 1; }
+.link-row .link-url { flex-grow: 1; display: block; }
+.link-row .whitelist-status {
+    display: none;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1.2;
+    font-weight: 600;
+    background-color: #e9ecef;
+    color: #495057;
+    white-space: nowrap;
+}
+.link-row .whitelist-status.active { display: inline-flex; }
+.link-row .whitelist-status.progress { background-color: #d1ecf1; color: #0c5460; }
+.link-row .whitelist-status.success { background-color: #d4edda; color: #155724; }
+.link-row .whitelist-status.info { background-color: #e2e3e5; color: #343a40; }
+.link-row .whitelist-status.error { background-color: #f8d7da; color: #721c24; }
 .action-icon {
     flex-shrink: 0; display: flex; align-items: center; justify-content: center;
     width: 28px; height: 28px; padding: 0; font-size: 14px;
@@ -210,9 +227,15 @@ button:hover {
     background-color: gray; color: white; cursor: pointer;
 }
 .action-icon:hover { opacity: 0.8; transform: none; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-.action-icon:disabled { background-color: #5cb85c !important; opacity: 0.8; cursor: not-allowed; }
-.visit-link-button { background-color: #6c757d; }
+.action-icon:disabled { opacity: 0.6; cursor: not-allowed; }
+.visit-link-button { background-color: #6c757d; font-size: 16px; }
+.visit-link-button[data-variant="main"] { background-color: #0d6efd; }
+.visit-link-button[data-variant="amp"] { background-color: #fd7e14; }
 .whitelist-button { background-color: #f0ad4e; }
+.action-icon.is-loading { background-color: #17a2b8; }
+.action-icon.is-success { background-color: #28a745; }
+.action-icon.is-info { background-color: #6c757d; }
+.action-icon.is-error { background-color: #d9534f; }
 
 
 /* --- Tampilan Whitelist --- */
