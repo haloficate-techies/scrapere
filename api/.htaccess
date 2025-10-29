@@ -1,19 +1,16 @@
 Options -MultiViews
 DirectoryIndex index.php
 
-# Enable rewriting for front-controller routing
 RewriteEngine On
 RewriteBase /api/
 
-# Pass Authorization header through to PHP (used for Bearer tokens)
+# Biarkan header Authorization tetap diteruskan
 SetEnvIf Authorization ".+" HTTP_AUTHORIZATION=$0
 
-# If the requested resource exists as a file or directory, serve it directly
+# Jika file atau folder ada, jangan rewrite
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
 
-# Route everything else to index.php
-RewriteRule ^$ index.php [QSA,L]
-RewriteRule ^(.+)$ index.php [QSA,L]
-
+# Semua request lain arahkan ke index.php (router)
+RewriteRule ^ index.php [QSA,L]

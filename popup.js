@@ -2,7 +2,7 @@
 // OVH API CONFIG (Web Cloud)
 // ===================================================================
 // Ganti ini dengan domain API di hosting OVH Anda
-const API_BASE = 'https://saligia.app/api'; // contoh: https://example.com/api
+const API_BASE = 'https://saligia.app/api/'; // contoh: https://example.com/api
 
 // Shim minimal untuk kompatibilitas kode lama yang memakai Firebase FieldValue
 const firebase = {
