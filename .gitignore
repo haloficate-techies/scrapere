@@ -1,0 +1,41 @@
+# ====================================
+# 👾 SCRAPERE CHROME EXTENSION PROJECT
+# ====================================
+
+# --- VS Code & Editor Config ---
+.vscode/
+.vscode/sftp.json
+
+# --- Environment Variables (API, DB, etc.) ---
+.env
+.env.local
+.env.*.local
+
+# --- Build & Output Folders (for extensions) ---
+dist/
+build/
+out/
+node_modules/
+
+# --- Logs & Temp Files ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+*.tmp
+*.bak
+
+# --- OS/System Files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Chrome Extension Cache / Keys ---
+*.pem
+*.crx
+*.zip
+
+# --- Misc (optional) ---
+.idea/
+.sass-cache/
+.cache/
