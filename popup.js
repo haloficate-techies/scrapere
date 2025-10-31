@@ -41,7 +41,13 @@ async function saveToken(t) {
 async function apiRequest(path, { method = 'GET', body = null } = {}) {
     const headers = { 'Content-Type': 'application/json' };
     if (apiToken) headers['Authorization'] = `Bearer ${apiToken}`;
-    const res = await fetch(`${API_BASE}${path}`, {
+
+    // Gabungkan base URL + path tanpa double slash supaya rewrite di server bekerja.
+    const base = API_BASE.replace(/\/+$/, '');
+    const normalizedPath = path.replace(/^\/+/, '');
+    const url = `${base}/${normalizedPath}`;
+
+    const res = await fetch(url, {
         method,
         headers,
         body: body ? JSON.stringify(body) : null,
@@ -1171,8 +1177,3 @@ async function renderWhitelistManager() {
         renderWhitelistManager();
     });
 }
-
-
-
-
-
